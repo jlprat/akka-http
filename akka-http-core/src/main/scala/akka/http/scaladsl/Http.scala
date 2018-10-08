@@ -293,34 +293,59 @@ class HttpExt private[http] (private val config: Config)(implicit val system: Ex
    * Any other value for `parallelism` overrides the setting.
    */
   def bindAndHandleAsync(
-    handler:   HttpRequest ⇒ Future[HttpResponse],
-    interface: String, port: Int = DefaultPortForProtocol,
-    connectionContext: ConnectionContext = defaultServerHttpContext,
-    settings:          ServerSettings    = ServerSettings(system),
-    parallelism:       Int               = 0,
-    log:               LoggingAdapter    = system.log)(implicit fm: Materializer): Future[ServerBinding] = {
+    handler:           HttpRequest ⇒ Future[HttpResponse],
+    interface:         String,
+    port:              Int                                = DefaultPortForProtocol,
+    connectionContext: ConnectionContext                  = defaultServerHttpContext,
+    settings:          ServerSettings                     = ServerSettings(system),
+    log:               LoggingAdapter                     = system.log)(implicit fm: Materializer): Future[ServerBinding] = {
     val http2Enabled = settings.previewServerSettings.enableHttp2 && connectionContext.http2 != Never
     val http2Forced = connectionContext.http2 == Always
     if (http2Enabled && (connectionContext.isSecure || http2Forced)) {
       // We do not support HTTP/2 negotiation for insecure connections (h2c), https://github.com/akka/akka-http/issues/1966
       log.debug("Binding server using HTTP/2{}", if (http2Forced) " (forced to be used without TLS)" else "")
-
-      val definitiveSettings =
-        if (parallelism > 0) settings.mapHttp2Settings(_.withMaxConcurrentStreams(parallelism))
-        else if (parallelism < 0) throw new IllegalArgumentException("Only positive values allowed for `parallelism`.")
-        else settings
-      Http2Shadow.bindAndHandleAsync(handler, interface, port, connectionContext, definitiveSettings, definitiveSettings.http2Settings.maxConcurrentStreams, log)(fm)
+      Http2Shadow.bindAndHandleAsync(handler, interface, port, connectionContext, settings, settings.http2Settings.maxConcurrentStreams, log)(fm)
     } else {
       if (http2Enabled)
         log.debug("The akka.http.server.preview.enable-http2 flag was set, " +
           "but a plain HttpConnectionContext (not Https) was given, binding using plain HTTP...")
-
-      val definitiveParallelism =
-        if (parallelism > 0) parallelism
-        else if (parallelism < 0) throw new IllegalArgumentException("Only positive values allowed for `parallelism`.")
-        else settings.pipeliningLimit
-      bindAndHandle(Flow[HttpRequest].mapAsync(definitiveParallelism)(handler), interface, port, connectionContext, settings, log)
+      bindAndHandle(Flow[HttpRequest].mapAsync(settings.pipeliningLimit)(handler), interface, port, connectionContext, settings, log)
     }
+  }
+
+  /**
+   * Convenience method which starts a new HTTP server at the given endpoint and uses the given `handler`
+   * [[akka.stream.scaladsl.Flow]] for processing all incoming connections.
+   *
+   * The number of concurrently accepted connections can be configured by overriding
+   * the `akka.http.server.max-connections` setting. Please see the documentation in the reference.conf for more
+   * information about what kind of guarantees to expect.
+   *
+   * To configure additional settings for a server started using this method,
+   * use the `akka.http.server` config section or pass in a [[akka.http.scaladsl.settings.ServerSettings]] explicitly.
+   *
+   * Parameter `parallelism` specifies how many requests are attempted to be handled concurrently per connection. In HTTP/1
+   * this makes only sense if HTTP pipelining is enabled (which is not recommended). The default value of `0` means that
+   * the value is taken from the `akka.http.server.pipelining-limit` setting from the configuration. In HTTP/2,
+   * the default value is taken from `akka.http.server.http2.max-concurrent-streams`.
+   *
+   * Any other value for `parallelism` overrides the setting.
+   * @deprecated use the [[bindAndHandleAsync]] variant without the `parallelism` parameter.
+   */
+  @deprecated(message = "use the bindAndHandleAsync variant without the `parallelism` parameter", since = "10.1.6")
+  def bindAndHandleAsync(
+    handler:           HttpRequest ⇒ Future[HttpResponse],
+    interface:         String,
+    port:              Int,
+    connectionContext: ConnectionContext,
+    settings:          ServerSettings,
+    parallelism:       Int,
+    log:               LoggingAdapter)(implicit fm: Materializer): Future[ServerBinding] = {
+    val definitiveSettings =
+      if (parallelism > 0) settings.mapHttp2Settings(_.withMaxConcurrentStreams(parallelism)).withPipeliningLimit(parallelism)
+      else if (parallelism < 0) throw new IllegalArgumentException("Only positive values allowed for `parallelism`.")
+      else settings
+    bindAndHandleAsync(handler, interface, port, connectionContext, definitiveSettings, log)
   }
 
   type ServerLayer = Http.ServerLayer
@@ -391,7 +416,7 @@ class HttpExt private[http] (private val config: Config)(implicit val system: Ex
     _outgoingConnection(host, port, settings.withLocalAddressOverride(localAddress), ConnectionContext.noEncryption(), log)
 
   /**
-   * Same as [[#outgoingConnection]] but for encrypted (HTTPS) connections.
+   * Same as [[outgoingConnection]] but for encrypted (HTTPS) connections.
    *
    * If an explicit [[HttpsConnectionContext]] is given then it rather than the configured default [[HttpsConnectionContext]] will be used
    * for encryption on the connection.
@@ -506,7 +531,7 @@ class HttpExt private[http] (private val config: Config)(implicit val system: Ex
   }
 
   /**
-   * Same as [[#newHostConnectionPool]] but for encrypted (HTTPS) connections.
+   * Same as [[newHostConnectionPool]] but for encrypted (HTTPS) connections.
    *
    * If an explicit [[ConnectionContext]] is given then it rather than the configured default [[ConnectionContext]] will be used
    * for encryption on the connections.
@@ -586,7 +611,7 @@ class HttpExt private[http] (private val config: Config)(implicit val system: Ex
     cachedHostConnectionPoolImpl(host, port, settings, log)
 
   /**
-   * Same as [[#cachedHostConnectionPool]] but for encrypted (HTTPS) connections.
+   * Same as [[cachedHostConnectionPool]] but for encrypted (HTTPS) connections.
    *
    * If an explicit [[ConnectionContext]] is given then it rather than the configured default [[ConnectionContext]] will be used
    * for encryption on the connections.
